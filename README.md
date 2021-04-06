@@ -1,951 +1,934 @@
-# Homework 3 Dynamic Memory Allocator - CSE 320 - Spring 2021
+# Homework 4 Printer Spooler - CSE 320 - Spring 2021
 #### Professor Eugene Stark
 
-### **Due Date: Friday 3/26/2021 @ 11:59pm**
+### **Due Date: Friday 4/16/2021 @ 11:59pm**
 
+## Introduction
 
-We **HIGHLY** suggest that you read this entire document, the book chapter,
-and examine the base code prior to beginning. If you do not read the entire
-document before beginning, you may find yourself doing extra work.
+The goal of this assignment is to become familiar with low-level Unix/POSIX system
+calls related to processes, signal handling, files, and I/O redirection.
+You will implement a printer spooler program, called `imprimer`, that accepts user
+requests to queue files for printing, cancel printing requests, pause and resume
+print jobs, show the status of printers and print jobs, and set up pipelines to
+convert queued files of one type to the type of file accepted by an available printer.
 
-> :scream: Start early so that you have an adequate amount of time to test
-your program!
+### Takeaways
 
-> :scream: The functions `malloc`, `free`, `realloc`, `memalign`, `calloc`,
-> etc., are **NOT ALLOWED** in your implementation. If any of these functions,
-> or any other function with similar functionality is found in your program,
-> you **will receive a <font color="red">ZERO</font>**.
+After completing this assignment, you should:
 
-**NOTE:** In this document, we refer to a word as 2 bytes (16 bits) and a memory
-row as 4 words (64 bits). We consider a page of memory to be 8192 bytes (8 KB)
+* Understand process execution: forking, executing, and reaping.
+* Understand signal handling.
+* Understand the use of "dup" to perform I/O redirection.
+* Have a more advanced understanding of Unix commands and the command line.
+* Have gained experience with C libraries and system calls.
+* Have enhanced your C programming abilities.
 
-# Introduction
+## Hints and Tips
 
-You must read **Chapter 9.9 Dynamic Memory Allocation Page 839** before
-starting this assignment. This chapter contains all the theoretical
-information needed to complete this assignment. Since the textbook has
-sufficient information about the different design strategies and
-implementation details of an allocator, this document will not cover this
-information. Instead, it will refer you to the necessary sections and pages in
-the textbook.
+* We **strongly recommend** that you check the return codes of **all** system calls
+  and library functions.  This will help you catch errors.
+* **BEAT UP YOUR OWN CODE!** Exercise your code thoroughly with various numbers of
+  processes and timing situations, to make sure that no sequence of events can occur
+  that can crash the program.
+* Your code should **NEVER** crash, and we will deduct points every time your
+  program crashes during grading.  Especially make sure that you have avoided
+  race conditions involving process termination and reaping that might result
+  in "flaky" behavior.  If you notice odd behavior you don't understand:
+  **INVESTIGATE**.
+* You should use the `debug` macro provided to you in the base code.
+  That way, when your program is compiled without `-DDEBUG`, all of your debugging
+  output will vanish, preventing you from losing points due to superfluous output.
 
-## Takeaways
+> :nerd: When writing your program, try to comment as much as possible and stay
+> consistent with code formatting.  Keep your code organized, and don't be afraid
+> to introduce new source files if/when appropriate.
 
-After completing this assignment, you will have a better understanding of:
-* The inner workings of a dynamic memory allocator
-* Memory padding and alignment
-* Structs and linked lists in C
-* [errno](https://linux.die.net/man/3/errno) numbers in C
-* Unit testing in C
+### Reading Man Pages
 
-# Overview
+This assignment will involve the use of many system calls and library functions
+that you probably haven't used before.
+As such, it is imperative that you become comfortable looking up function
+specifications using the `man` command.
 
-You will create an allocator for the x86-64 architecture with the following features:
+The `man` command stands for "manual" and takes the name of a function or command
+(programs) as an argument.
+For example, if I didn't know how the `fork(2)` system call worked, I would type
+`man fork` into my terminal.
+This would bring up the manual for the `fork(2)` system call.
 
-- Free lists segregated by size class, using first-fit policy within each size class.
-- Immediate coalescing of large blocks on free with adjacent free blocks.
-- Boundary tags to support efficient coalescing, with footer optimization that allows
-    footers to be omitted from allocated blocks.
-- Block splitting without creating splinters.
-- Allocated blocks aligned to "double memory row" (16-byte) boundaries.
-- Free lists maintained using **last in first out (LIFO)** discipline.
-- "Wilderness block" heuristic, to avoid unnecessary growing of the heap.
+> :nerd: Navigating through a man page once it is open can be weird if you're not
+> familiar with these types of applications.
+> To scroll up and down, you simply use the **up arrow key** and **down arrow key**
+> or **j** and **k**, respectively.
+> To exit the page, simply type **q**.
+> That having been said, long `man` pages may look like a wall of text.
+> So it's useful to be able to search through a page.
+> This can be done by typing the **/** key, followed by your search phrase,
+> and then hitting **enter**.
+> Note that man pages are displayed with a program known as `less`.
+> For more information about navigating the `man` pages with `less`,
+> run `man less` in your terminal.
 
-You will implement your own versions of the **malloc**, **realloc**,
-**free**, and **memalign** functions.
+Now, you may have noticed the `2` in `fork(2)`.
+This indicates the section in which the `man` page for `fork(2)` resides.
+Here is a list of the `man` page sections and what they are for.
 
-You will use existing Criterion unit tests and write your own to help debug
-your implementation.
+| Section          | Contents                                |
+| ----------------:|:--------------------------------------- |
+| 1                | User Commands (Programs)                |
+| 2                | System Calls                            |
+| 3                | C Library Functions                     |
+| 4                | Devices and Special Files               |
+| 5                | File Formats and Conventions            |
+| 6                | Games et. al                            |
+| 7                | Miscellanea                             |
+| 8                | System Administration Tools and Daemons |
 
-## Free List Management Policy
+From the table above, we can see that `fork(2)` belongs to the system call section
+of the `man` pages.
+This is important because there are functions like `printf` which have multiple
+entries in different sections of the `man` pages.
+If you type `man printf` into your terminal, the `man` program will start looking
+for that name starting from section 1.
+If it can't find it, it'll go to section 2, then section 3 and so on.
+However, there is actually a Bash user command called `printf`, so instead of getting
+the `man` page for the `printf(3)` function which is located in `stdio.h`,
+we get the `man` page for the Bash user command `printf(1)`.
+If you specifically wanted the function from section 3 of the `man` pages,
+you would enter `man 3 printf` into your terminal.
 
-Your allocator **MUST** use the following scheme to manage free blocks:
-Free blocks will be stored in a fixed array of `NUM_FREE_LISTS` free lists,
-segregated by size class (see **Chapter 9.9.14 Page 863** for a discussion
-of segregated free lists).
-Each individual free list will be organized as a **circular, doubly linked list**
-(more information below).
-The size classes are based on a power-of-two geometric sequence (1, 2, 4, 8, 16, ...),
-according to the following scheme:
-The first free list (at index 0) holds blocks of the minimum size `M`
-(where `M = 32` for this assignment).
-The second list (at index 1) holds blocks of size `(M, 2M]`.
-The third list (at index 2) holds blocks of size `(2M, 4M]`.
-The fourth list holds blocks whose size is in the interval `(4M, 8M]`.
-The fifth list holds blocks whose size is in the interval `(8M, 16M]`,
-and so on.
-This pattern continues up to the interval `(16M, 32M]`,
-and then the second-to-last list (at index `NUM_FREE_LISTS-2`; *i.e.* 6)
-holds blocks of size greater than `32M`.
-The last list (at index `NUM_FREE_LISTS-1`; *i.e.* 7) is only used to contain
-the so-called "wilderness block", which is the free block at the end of the heap
-that will be extended when the heap is grown.
-Allocation requests will be satisfied by searching the free lists in increasing
-order of size class; considering the last list with the wilderness block only
-if no suitable block has been found in the earlier lists.
+> :scream: Remember this: **`man` pages are your bread and butter**.
+> Without them, you will have a very difficult time with this assignment.
 
-> :nerd: This policy means that the wilderness block will effectively be treated
-> as larger than any other free block, regardless of its actual size.
-> This "wilderness preservation" heuristic tends to prevent the heap from growing
-> unnecessarily.
+## Getting Started
 
-## Block Placement Policy
+Fetch and merge the base code for `hw4` as described in `hw0`.
+You can find it at this link: https://gitlab02.cs.stonybrook.edu/cse320/hw4
 
-When allocating memory, use a **segregated fits policy** as follows.
-First, the smallest size class that is sufficiently large to satisfy the request
-is determined.  The free lists are then searched, starting from the list for the
-determined size class and continuing in increasing order of size, until a nonempty
-list is found.  The request is then satisfied by the first block in that list
-that is sufficiently large; *i.e.* a **first-fit policy**
-(discussed in **Chapter 9.9.7 Page 849**) is applied within each individual free list.
-The last list, which contains only the wilderness block (if there currently is one),
-is considered only if no sufficiently large block is found in any of the earlier lists.
-
-If there is no free list that contains a sufficiently large block,
-then `sf_mem_grow` should be called to extend the heap by an additional page of memory.
-After **coalescing** this page (see below) with any free block that immediately precedes
-it (*i.e.* with the wilderness block), you should attempt to use the resulting block of memory
-to satisfy the allocation request;
-splitting it if it is too large and no splinter (*i.e.* a block of less than the minimum
-block size) would result.  If the block of memory is still not large enough, another call to
-`sf_mem_grow` should be made; continuing to grow the heap until either a large enough block
-is obtained or the return value from `sf_mem_grow` indicates that there is no more memory.
-
-As discussed in the book, segregated free lists allow the allocator to approximate a
-best-fit policy, with lower overhead than would be the case if an exact best-fit policy
-were implemented.
-
-## Splitting Blocks & Splinters
-
-Your allocator must split blocks at allocation time to reduce the amount of
-internal fragmentation.  Details about this feature can be found in **Chapter 9.9.8 Page 849**.
-Due to alignment and overhead constraints, there will be a minimum useful block size
-that the allocator can support.  **For this assignment, pointers returned by the allocator
-in response to allocation requests are required to be aligned to 16-byte boundaries**;
-*i.e.* the pointers returned will be addresses that are multiples of 2^4.
-The 16-byte alignment requirement implies that the minimum block size for your allocator
-will be 32 bytes.  No "splinters" of smaller size than this are ever to be created.
-If splitting a block to be allocated would result in a splinter, then the block should
-not be split; rather, the block should be used as-is to satisfy the allocation request
-(*i.e.*, you will "over-allocate" by issuing a block slightly larger than that required).
-
-> :thinking: How do the alignment and overhead requirements constrain the minimum block size?
-> As you read more details about the format of a block header, block footer, and alignment requirements,
-> you should try to answer this question.
-
-## Freeing a Block
-
-When a block is freed, an attempt should first be made to **coalesce** the block with
-any free block that immediately precedes or follows it in the heap.
-(See **Chapter 9.9.10 Page 850** for a discussion of the coalescing procedure.)
-Once the block has been coalesced, it should be inserted at the **front** of the free
-list for the appropriate size class (based on the size after coalescing).
-The reason for performing coalescing is to combat the external fragmentation
-that would otherwise result due to the splitting of blocks upon allocation.
-
-## Block Headers & Footers
-
-In **Chapter 9.9.6 Page 847 Figure 9.35**, a block header is defined as 2 words
-(32 bits) to hold the block size and allocated bit. In this assignment, the header
-will be 4 words (i.e. 64 bits or 1 memory row). The header fields will be similar
-to those in the textbook but you will maintain an extra field for recording whether
-or not the previous block is allocated.
-Each free block will also have a footer, which occupies the last memory row of the block.
-The footer of a free block contains exactly the same information as the header.
-In an allocated block, the footer is not present, and the space that it would otherwise
-occupy may be used for payload.
-
-**Block Header Format:**
-```c
-    +------------------------------------------------------------+--------+---------+---------+ <- header
-    |                                       block_size           | unused |prv alloc|  alloc  |
-    |                                  (4 LSB's implicitly 0)    |  (0)   |  (0/1)  |  (0/1)  |
-    |                                        (1 row)             | 2 bits |  1 bit  |  1 bit  |
-    +------------------------------------------------------------+--------+---------+---------+ <- (ali
-```
-
-- The `block_size` field gives the number of bytes for the **entire** block (including header/footer,
-  payload, and padding).  It occupies the entire 64 bits of the block header or footer,
-  except that two of the four least-significant bits of the block size, which would normally always
-  be zero due to alignment requirements, are used to store the allocation status (free/allocated)
-  of that block and of the immediately preceding block in the heap.  This means that these two bits
-  have to be masked when retrieving the block size from the header and when the block size is stored
-  in the header the previously existing values of these two bits have to be preserved.
-- The `alloc` bit (bit 0, mask 0x1) is a boolean. It is 1 if the block is allocated and 0 if it is free.
-- The `prev_alloc` (bit 1, mask 0x2) is also a boolean. It is 1 if the **immediately preceding** block
-  in the heap is allocated and 0 if it is not.
-
-> :thinking:  Here is an example of determining the block size required to satisfy
-> a particular requested payload size.  Suppose the requested size is 25 bytes.
-> An additional 8 bytes will be required to store the block header, which must always
-> be present.  This means that a block of at least 33 bytes must be used, however due
-> to alignment requirements this has to be rounded up to the next multiple of the
-> alignment size.  If the alignment size were 16 bytes (which would be just large enough
-> to enable the memory returned by the allocator to store in an aligned fashion any of
-> the basic data types supported by the x86-64 architecture), then a block of at least
-> 48 bytes would have to be used.  As a result, there would be 15 bytes of "padding"
-> at the end of the payload area, which contributes to internal fragmentation.
-> Besides the header, when the block is free it is also necessary to store a footer,
-> as well and next and previous links for the freelist.
-> These will take an additional 24 bytes of space, however when the block is free there
-> is no payload so the payload area can be used to store this information, assuming that
-> the payload area is big enough in the first place.  But the payload area is 40 bytes
-> (25 bytes plus 15 bytes of padding), which is certainly bigger than 24 bytes,
-> so a block of total size 48 would be fine.
-> Note that a block cannot be smaller than 32 bytes, as there there would not then
-> be enough space to store the header, footer, and freelist links when the block is free.
-
-# Getting Started
-
-Fetch and merge the base code for `hw3` as described in `hw0` from the
-following link: https://gitlab02.cs.stonybrook.edu/cse320/hw3
-
-**Remember to use the `--strategy-option=theirs` flag with the `git merge`
-command as described in the `hw1` doc to avoid merge conflicts in the Gitlab
-CI file.**
-
-## Directory Structure
-
+Here is the structure of the base code:
 <pre>
 .
-├── .gitignore
-├── .gitlab-ci.yml
-└── hw3
-    ├── hw3.sublime-project
-    ├── include
-    │   ├── debug.h
-    │   └── sfmm.h
-    ├── lib
-    │   └── sfutil.o
-    ├── Makefile
-    ├── src
-    │   ├── main.c
-    │   └── sfmm.c
-    └── tests
-        └── sfmm_tests.c
+├── demo
+│   └── imprimer
+├── hw4.sublime-project
+├── include
+│   ├── conversions.h
+│   ├── debug.h
+│   ├── imprimer.h
+│   └── sf_readline.h
+├── lib
+│   └── imprimer.a
+├── Makefile
+├── src
+│   ├── cli.c
+│   └── main.c
+├── tests
+│   └── basecode_tests.c
+├── test_scripts
+│   ├── conversion_test.imp
+│   ├── convert_test.imp
+│   ├── help_test.imp
+│   ├── print_test.imp
+│   ├── testfile1.aaa
+│   ├── testfile.aaa
+│   ├── testfile.bbb
+│   ├── testfile.ccc
+│   └── type_test.imp
+└── util
+    ├── convert
+    ├── printer
+    ├── show_printers.sh
+    └── stop_printers.sh
 </pre>
 
-The `lib` folder contains the object file for the `sfutil` library. This
-library provides you with several functions to aid you with the implementation
-of your allocator. <span style="color:red">**Do NOT delete this file as it
-is an essential part of your homework assignment.**</span>
+As usual, the `include` directory contains header files and the `src`
+directory contain C source files.  The header files that have been provided
+in the base code should not be modified.  You may, however, create your
+own header files if you wish.  Also, the `main.c` source file should
+not be changed.  The `demo` directory contains a demonstration version of
+the completed program.  The `lib` directory contains a library that will
+be linked with your code to supply various pre-implemented functions.
+The `tests` directory contains a few basic tests to get you started.
+These make use of the files in the `test_scripts` directory.
+The `util` directory contains various executables and shell scripts
+that are related to simulating "printers".
+The various provided components are discussed in more detail below.
 
-The provided `Makefile` creates object files from the `.c` files in the `src`
-directory, places the object files inside the `build` directory, and then links
-the object files together, including `lib/sfutil.o`, to make executables that
-are stored to the `bin` directory.
+If you run `make`, the code should compile correctly, resulting in an
+executable `bin/imprimer`.  If you run this program, it doesn't do very
+much, because there is very little code -- you have to write it!
 
-**Note:** `make clean` will not delete `sfutil.o` or the `lib` folder, but it
-will delete all other contained `.o` files.
+## `Imprimer`: Functional Specification
 
-The `sfmm.h` header file contains function prototypes and defines the format
-of the various data structures that you are to use.
+### Command-Line Interface
 
-> :scream: **DO NOT modify `sfmm.h` or the Makefile.** Both will be replaced when we run
-> tests for grading. If you wish to add things to a header file, please create
-> a new header file in the `include` folder
+When started, `imprimer` should present the user with a command-line
+interface with the following prompt
 
-The program in `src/main.c` contains a basic example of using the allocation functions.
-Running `make` will create a `sfmm` executable in the `bin` directory. This can be run
-using the command `bin/sfmm`.
+```sh
+imp>
+```
 
-> Any functions other than `sf_malloc`, `sf_free`, `sf_realloc`, and `sf_memalign`
-> **WILL NOT** be graded.
+Typing a blank line should should simply cause the prompt to be repeated,
+without any other printout or action by the program.
+Non-blank lines are interpreted as commands to be executed.
+`Imprimer` commands have a simple syntax, in which each command consists
+of a sequence of "words", which contain no whitespace characters,
+separated by sequences of one or more whitespace characters.
+The first word of each command is a keyword that names the command.
+Any remaining words are the arguments to the command.
+`Imprimer` should understand the following commands, with arguments as
+indicated.
+Square brackets are not part of the arguments; they merely identify arguments
+that are optional.
 
-# Allocation Functions
+  * Miscellaneous commands
+    * `help`
+    * `quit`
 
-You will implement the following four functions in the file `src/sfmm.c`.
-The file `include/sfmm.h` contains the prototypes and documentation found here.
+  * Configuration commands
+    * `type` *file_type*
+    * `printer` *printer_name* *file_type*
+    * `conversion` *file_type1* *file_type2* *conversion_program* [*arg1* *arg2* ...]
 
-Standard C library functions set `errno` when there is an error. To avoid
-conflicts with these functions, your allocation functions will set `sf_errno`, a
-variable declared as `extern` in `sfmm.h`.
+  * Informational commands
+    * `printers`
+	* `jobs`
+
+  * Spooling commands
+    * `print` *file_name* [printer1 printer2 ...]
+    * `cancel` *job_number*
+	* `pause` *job_number*
+	* `resume` *job_number*
+	* `disable` *printer_name*
+	* `enable` *printer_name*
+
+The `help` command takes no arguments, and it responds by printing a message
+that lists all of the types of commands understood by the program.
+
+The `quit` command takes no arguments and causes execution to terminate.
+
+The `type` command declares *file_type* to be a file type to be supported
+by the program.  Possible examples (but not an exhaustive list) of file types
+are: `pdf` (Adobe PDF), `ps` (Adobe Postscript), `txt` (text), `png` (PNG image files),
+*etc*.  A file will be presumed to be of a particular type when it has an extension
+that matches that type.  For example, `foo.txt` will be presumed to be a
+text file, if `txt` has previously been declared using the `type` command.
+Files whose names do not having an extension that matches a declared type
+are considered of unknown type and are to be rejected if an attempt is made
+to spool them for printing.
+Essentially any identifier can be used as a file type -- they may (but aren't
+required to) correspond to "known" file types that have standards, are supported
+by other programs, *etc*.
+
+The `printer` command declares the existence of a printer named *printer_name*,
+which is capable of printing files of type *file_type*.  The *printer_name*
+is just an identifier, such as `Alice`.  Each printer is only capable of printing
+files of the (one) type that has been declared for it, and your program should take
+care not to send a printer the wrong type of file.
+
+The `conversion` command declares that files of type *file_type1* can be
+converted into *file_type2* by running program *conversion_program* with any
+arguments that have been indicated.  It is assumed that `conversion_program` reads
+input of type *file_type1* from the standard input and writes output of type
+*file_type2* to the standard output, so that it is suitable for use in a pipeline
+consisting of possibly several such programs.  For example, on your Linux Mint VM:
+
+ * The command `pdf2ps - -` can be used to convert PDF read from the standard input
+   to Postscript on the standard output.
+
+ * The command `pbmtext` can be used to convert text read from the standard input
+   to a Portable Bitmap (pbm) file on the standard output.
+
+ * The command `pbmtoascii` can be used to convert a Portable Bitmap (pbm) file read
+   from the standard input to an ASCII graphics (i.e. text) file on the standard output.
+
+ * The command `pbmtog3` can be used to convert a Portable Bitmap (pbm) file read
+   from the standard input to a Group 3 FAX file (g3).
+
+There are many others: some of them work well together and others do not.
+For many of these commands there are also corresponding commands that convert formats
+in the reverse direction.
+
+The `printers` command prints a report on the current status of the declared printers,
+one printer per line.  For example:
+
+```
+imp> printers
+PRINTER: id=0, name=alice, type=ps, status=disabled
+PRINTER: id=1, name=bob, type=pcl, status=disabled
+```
+
+The `jobs` command prints a similar status report for the print jobs that have
+been queued.  For example:
+
+```
+imp> jobs
+JOB[0]: type=pdf, creation(22 Mar 12:06:14), status(22 Mar 12:06:14)=queued, eligible=ffffffff, file=foo.pdf
+JOB[1]: type=ps, creation(22 Mar 12:06:16), status(22 Mar 12:06:16)=queued, eligible=ffffffff, file=bar.ps
+JOB[2]: type=txt, creation(22 Mar 12:06:22), status(22 Mar 12:06:22)=queued, eligible=ffffffff, file=mumble.txt
+```
+
+The precise formats of these status reports are not important for grading purposes,
+as grading will be based on other "event functions" that your program must call.
+So you may format the output as you like to be intelligible by a human user,
+but your program should produce *some* kind of intelligible output.
+
+The `print` command sets up a job for printing *file_name*.
+The specified file name must have an extension that identifies it as one of the
+file types that have previously been declared with the `type` command.
+If optional printer names are specified, then these printers must previously
+have been declared using the `printer` command, and they define the set of
+*eligible printers* for this job.  Only a printer in the set of eligible printers
+for a job should be used for printing that jobs.  Moreover, an eligible printer
+can only be used to print a job if there is a way to convert the file in the
+job to the type that can be printed by that printer.
+If no printer name is specified in the `print` command, then any declared
+printer is an eligible printer.
+
+The `cancel` command cancels an existing job.  If the job is currently being
+processed, then any processes in the conversion pipeline for that job
+are terminated (by sending a `SIGTERM` signal to their process group).
+(If the job was paused, then after sending `SIGTERM` a `SIGCONT` should also
+be sent to allow the processes in the pipeline to continue and respond
+to the `SIGTERM`.)
+
+The `pause` command pauses a job that is currently being processed.
+Processes in the conversion pipeline for that job are stopped
+(by sending a `SIGSTOP` signal to their process group).
+
+The `resume` command resumes a job that was previously paused.
+Processes in the conversion pipeline for that job are continued
+(by sending a `SIGCONT` signal to their process group).
+
+The `disable` command sets the state of a specified printer to "disabled".
+This does not affect the status of any job currently being processed
+by that printer, but a disabled printer is not eligible to accept any
+further jobs until it has been re-enabled using the `enable` command.
+
+The `enable` command sets the state of a specified printer to "enabled".
+When a printer becomes enabled, if there is a pending job that can now be
+processed by the newly enabled printer, then processing is immediately
+started for one such job.
+
+### Processing Print Jobs
+
+The purpose of `imprimer` is to process print jobs that are queued by the user.
+Each time there is a change in status of a job or printer as a result of a user command
+or the completion of a job being processed, `imprimer` must scan the set of queued jobs
+to see if there are any that can now be processed, and if so, start them.
+In order for a job to be processed, there must exist a printer that is enabled and
+not busy, the printer must be in the `eligible_printers` set for that job,
+and there must be a way to convert the type of file in the job to the type
+of file the printer is capable of printing.  If these conditions hold, then the
+job status is set to "running" and the chosen printer is set to "busy".
+A group of processes called a *conversion pipeline* is set up to run a series of
+programs that will convert the type of file in the job to the type of file that the
+printer can print.  This is described further below.
+
+> :scream:  Your program must start a job *promptly* as soon as it is possible
+> to do so.  If there is any substantial delay in starting a job, your program
+> will fail our tests that test for this.  For concreteness, we will define a
+> "substantial" delay to be anything more than about one millisecond.
+
+A job will exist at any given time in one of various states, the possibilities
+for which are defined by the `JOB_STATUS` enum in `imprimer.h`.
+These states and their meanings are:
+
+  * `JOB_CREATED` -- The job has been created and is ready for processing.
+	A job will persist in this state only as long as there are no printers in
+	the set of eligible printers for that job which can be used to print the job.
+    As soon as an eligible printer (of an appropriate type) becomes available,
+    the job will transition to the `JOB_RUNNING` state.
+  
+  * `JOB_RUNNING` -- An eligible printer of an appropriate type has been chosen for
+    the job and a conversion pipeline has been created to convert the file in the
+    job to the type of file that the printer is capable of printing.
+    The chosen printer must be among the printers in the `eligible_printers` set
+    for that job.  For a job to be started on a printer, the printer must be idle.
+	The printer status is changed to "busy", and it stays that way as long as the
+    job is "running".
+
+  * `JOB_PAUSED` -- A job that was previously in the `JOB_RUNNING` has temporarily
+    been stopped by sending a `SIGSTOP` signal to the process group of the processes
+    in the conversion pipeline.  A job in the `JOB_PAUSED` state will remain in that
+    state until a `resume` command has been issued by the user.  This will cause a
+    `SIGCONT` signal to be sent to the process group of the conversion pipeline.
+	
+	> :scream:  The state of a job should **not** be changed immediately when the
+	> user issues a `pause` command.  Instead, the `SIGSTOP` signal should first be
+    > sent and the state of the job changed from `JOB_RUNNING` to `JOB_PAUSED` **only**
+    > when a `SIGCHLD` signal has subsequently been received and a call to the
+    > `waitpid()` function returns showing `WIFSTOPPED` true of the process status.
+    > Similarly, the state of a job should not be changed immediately when the
+	> user issues a `resume` command, but only once a `SIGCHLD` signal has been
+    > received and a subsequent call to `waitpid()` returns showing `WIFCONTINUED`
+    > true of the process status.
+	
+  * `JOB_FINISHED` -- A job enters this state from the `JOB_RUNNING` state once processing
+	has completed and the processes in the conversion pipeline have terminated normally.
+    The new status of the job is reported to the user via the command-line interface
+	*promptly* upon termination of the job.  By "promptly", we mean "within one millisecond
+    of the termination of the job".
+
+  * `JOB_ABORTED` -- A job enters this state from the `JOB_RUNNING` state if one or more
+	processes in the job pipeline terminate abnormally.
+    The new status of the job is reported to the user via the command-line interface
+	*promptly* upon termination of the job.  By "promptly", we mean "within one millisecond
+    of the termination of the job".
+
+  * `JOB_DELETED` -- Once a job has entered the `JOB_FINISHED` or `JOB_ABORTED` state,
+	it will remain in the job queue for ten seconds, to permit the user to view the
+    results of that job can be viewed using the `jobs` command.  After the ten seconds
+    has elapsed, the job will become eligible for deletion from the job queue, and it will
+    enter the `JOB_DELETED` state *just after* the execution of the first user command
+    following the expiration of the ten second interval.
+    As soon as a job enters the `JOB_DELETED` state, it is removed *promptly* from the
+    job queue so that it is no longer visible to the user via the `jobs` command.
+    The job ID of a deleted job is then available for re-use with a new job.
+
+The `imprimer` program must install a `SIGCHLD` handler so that it can be notified
+immediately upon completion of a job being processed.  The handler must appropriately
+arrange to update the job and printer status information and start any further jobs
+in the queue that can now be processed by virtue of the printer having become available.
+
+  > :nerd: Note that you will likely need to use `sigprocmask()` to block signals
+  > at appropriate times, to avoid races between the handler and the main program,
+  > the occurrence of which which will result in indeterminate behavior.
+  > The need for `sigprocmask()` can be reduced by installing a handler that just
+  > sets a "signal received" flag, and performing the actual work of signal handling
+  > from a function called back from `sf_readline()`.  That way, you have control
+  > over when the signal handling work is done, and it is easier to arrange that the
+  > handler does not interfere with the main program.
+
+Each time the status of a job or printer changes, your program must respond
+*promptly* (within one millisecond) to the status change.
+This requirement means that it is not acceptable to wait for user input before
+dealing with a state change, because that might delay the response for an
+arbitrarily long time.
+
+### Conversion Pipelines
+
+A particular printer can be used to service a particular job for which it is
+eligible, as long as there exists a sequence of conversions that will transform
+the type of the file to be printed into a type that the printer can print.
+The actual conversion will be accomplished by a *conversion pipeline*,
+which is a series of concurrently executing processes, where the first process
+in the pipeline takes its input from the file to be printed, the last process
+in the pipeline sends its output to the printer, and each process in between
+reads its input from the previous process in the pipeline and sends its output
+to the next process in the pipeline.  Each process in the pipeline runs a command
+to perform a conversion that has been defined by the user using the
+`conversion` command.
+
+Creation of a conversion pipeline should be begun by the main program forking
+a single process to serve as the "master" process for the pipeline.  This process
+should use `setpgid()` to set its process group ID to its own process ID.
+The master process will then fork one child process for each link in the
+conversion path between the type of the file in the job and the type of file
+that the chosen printer can print.  Redirection should be used so that
+the standard input of the first process in the pipeline is the file to be printed
+and the standard output of the last process in the pipeline is the chosen
+printer (for which a file descriptor has been obtained using `imp_connect_to_printer()`).
+In addition, the `pipe()` and `dup()` (or `dup2()`) system calls should be used
+to arrange to connect the standard output of each intermediate process in the
+pipeline to the standard input of the next process.
+Each process in the pipeline will execute (using `execvp()`, for example)
+one of the conversion commands (previously declared by the user using the
+`conversion` command) to convert the file read on its standard input to the type
+required by the next process in the pipeline.
+
+  > :nerd: It is possible that the type of the queued file is the same as the
+  > type of file the printer can print.  In this case, no conversion is required,
+  > and the conversion program will consist of the master process and a single
+  > child process, which should execute the program `/bin/cat` with no arguments.
+
+The master process of a conversion pipeline is used to simplify the interaction
+of the conversion pipeline with the main process.  Since the master process creates
+its own process group before forking the child processes, all the child processes
+will exist in that process group.  The processes in the pipeline can therefore
+be paused and resumed by using `killpg()` to send a `SIGSTOP` or `SIGCONT` to
+that process group.  Only the master process is a child of the main process,
+so the main process only has to keep track of the process ID for the master process
+of each conversion pipeline that it starts.
+The master process of a conversion pipeline will need to keep track of its child
+processes, and to use `waitpid()` to reap them and collect their exit status.
+If any child process terminates by a signal or with a nonzero exit status,
+then the conversion pipeline will be deemed to have failed and the master process
+should exit with a nonzero exit status.
+The main process should interpret the nonzero exit status as an indication that
+the job has failed, and it should set the job to the `JOB_ABORTED` state.
+If all of the child processes in a conversion pipeline terminate normally with
+zero exit status, then the master process should also terminate normally with
+zero exit status.  The main process should interpret this situation as an indication
+that the job has succeeded, and it should set the job to the `JOB_FINISHED` state.
+
+  > :scream:  You **must** create the processes in a conversion pipeline using
+  > calls to `fork()` and `execvp()`.  You **must not** use the `system()` function,
+  > nor use any form of shell in order to create the pipeline, as the purpose of
+  > the assignment is to giving you experience with using the system calls involved
+  > in doing this.
+
+In order to determine whether a particular printer can be used to service a
+particular job and to construct the required conversion pipeline, it will be
+necessary to determine whether there is a sequence of conversions that can be
+used to transform the type of the file to be printed to the type of file the
+printer can print.  To avoid having you get bogged down in the details of a
+suitable data structure and search algorithm, which is not the main point of
+this assignment, I have provided an implementation.  Refer to the header file
+`conversions.h` for the specifications of the functions provided.
+Defined there are also two associated structure types:
 
 ```c
 /*
- * This is your implementation of sf_malloc. It acquires uninitialized memory that
- * is aligned and padded properly for the underlying system.
- *
- * @param size The number of bytes requested to be allocated.
- *
- * @return If size is 0, then NULL is returned without setting sf_errno.
- * If size is nonzero, then if the allocation is successful a pointer to a valid region of
- * memory of the requested size is returned.  If the allocation is not successful, then
- * NULL is returned and sf_errno is set to ENOMEM.
+ * Structure to represent information about a particular file type.
  */
-void *sf_malloc(size_t size);
+typedef struct file_type {
+  char *name;       /* Filename extension for this type. */
+  int index;        /* Unique identifying number for the conversion. */
+} FILE_TYPE;
 
 /*
- * Resizes the memory pointed to by ptr to size bytes.
- *
- * @param ptr Address of the memory region to resize.
- * @param size The minimum size to resize the memory to.
- *
- * @return If successful, the pointer to a valid region of memory is
- * returned, else NULL is returned and sf_errno is set appropriately.
- *
- *   If sf_realloc is called with an invalid pointer sf_errno should be set to EINVAL.
- *   If there is no memory available sf_realloc should set sf_errno to ENOMEM.
- *
- * If sf_realloc is called with a valid pointer and a size of 0 it should free
- * the allocated block and return NULL without setting sf_errno.
+ * Structure to represent information about a conversion between types.
  */
-void *sf_realloc(void *ptr, size_t size);
 
-/*
- * Marks a dynamically allocated region as no longer in use.
- * Adds the newly freed block to the free list.
- *
- * @param ptr Address of memory returned by the function sf_malloc.
- *
- * If ptr is invalid, the function calls abort() to exit the program.
- */
-void sf_free(void *ptr);
-
-/*
- * Allocates a block of memory with a specified alignment.
- *
- * @param align The alignment required of the returned pointer.
- * @param size The number of bytes requested to be allocated.
- *
- * @return If align is not a power of two or is less than the minimum block size,
- * then NULL is returned and sf_errno is set to EINVAL.
- * If size is 0, then NULL is returned without setting sf_errno.
- * Otherwise, if the allocation is successful a pointer to a valid region of memory
- * of the requested size and with the requested alignment is returned.
- * If the allocation is not successful, then NULL is returned and sf_errno is set
- * to ENOMEM.
- */
-void *sf_memalign(size_t size, size_t align);
+typedef struct conversion {
+    FILE_TYPE *from;
+    FILE_TYPE *to;
+    char **cmd_and_args;  /* Command to run to perform the conversion. */
+} CONVERSION;
 ```
 
-> :scream: <font color="red">Make sure these functions have these exact names
-> and arguments. They must also appear in the correct file. If you do not name
-> the functions correctly with the correct arguments, your program will not
-> compile when we test it. **YOU WILL GET A ZERO**</font>
+You must call ``conversions_init()`` before using any other functions of
+this module.  Call ``conversions_fini()`` when finished using it, to cause
+any memory that it allocated to be freed.  The function `define_type()`
+is used to define a new file type and the function `find_type()` is used
+to look up a file type by name.  The function `infer_file_type()`
+examines a pathname and, if possible, infers a file type based on any
+extension that the pathname might have.  The function `define_conversion()`
+defines a conversion between two file types, using a specified command
+and arguments.  The function `find_conversion_path()` searches for a
+way of converting one specified file type into another, using a pipeline
+of conversion commands, each of which reads from its standard input
+and writes to its standard output.
+If successful, the `find_conversion_path()` function returns a NULL-terminated
+array of pointers to `CONVERSION` structures, which describes the conversion
+path.  The `cmd_and_args` fields of these `CONVERSION` structures can be
+supplied, for example, to `execvp()` to execute the conversion commands.
+If the "from type" and "to type" supplied to `find_conversion_path()`
+are the same, then the array returned will be empty.
 
-# Initialization Functions
+### Printer Behavior
 
-In the `lib` directory, we have provided you with the `sfutil.o` object file.
-When linked with your program, this object file allows you to access the
-`sfutil` library, which contains the following functions:
+The `imprimer` system sends the output from a conversion pipeline to a *printer*.
+In the real world there would be real, physical printers, but for this assignment
+we just have virtual printers, which are implemented by "daemon" processes that
+are started when necessary by library code that is linked with your program.
+A virtual printer is declared by issuing a `printer` command to the command-line
+interface.  This command takes two arguments: the first is an identifier to be used
+as the name of the printer, and the second is the type of file that the printer
+is capable of printing.  At any given time, a printer will be in one of the following
+three states:
+
+  * `PRINTER_DISABLED` -- This is the state that a printer is in when it has
+	just been defined.  It is also possible for a printer to transition to this
+	state from the `PRINTER_IDLE` state if a `disable` command specifying
+	that printer has been given.  In the `PRINTER_DISABLED` state, a printer is
+    not available to accept output from a conversion pipeline.
+
+  * `PRINTER_IDLE` -- A printer in the `PRINTER_DISABLED` state transitions to the
+	`PRINTER_IDLE` state when a `enable` command specifying that printer has been
+    given.  In the `PRINTER_IDLE` state, a printer is available to receive the
+	output of a conversion pipeline, assuming that output is of the type that
+	the printer can print.
+  
+  * `PRINTER_BUSY` -- When a printer in the `PRINTER_IDLE` state has been chosen
+    to receive the output of a conversion pipeline, and `imp_connect_to_printer()`
+    has been called to create a connection to the printer, the printer transitions
+    to the `PRINTER_BUSY` state, and remains in this state until the conversion pipeline
+    has terminated and the connection has closed, at which time it transitions back
+    to the `PRINTER_IDLE` state.
+
+By default, when a file is spooled for printing, any printer will be *eligible*
+to receive the output from that print job, assuming that a conversion pipeline
+can be created to convert the type of data in the file to the type of data
+that the printer can print.  However, when spooling a file optional arguments
+can be given to specify specific printers that are eligible for printing that
+particular job.  In this case, only the printers named will be eligible for
+use by that particular print job and you must make sure not to choose an
+ineligible printer to receive the output of a print job.
+
+Printers record the results of their operation in files in a *spool directory*.
+The spool directory (which is created when you run `make`) is the directory `spool`
+in the top level `hw4` directory.
+In this directory, a file `xxx.log` records a log of the files "printed" by
+the printer named `xxx`.  If a printer named `xxx` is currently running, then
+the file `xxx.pid` will contain the process ID of the "daemon" process for that
+printer.  There will also be a "socket" `xxx.sock`, which is used by the library
+code to connect to the printer.  Other files in the spool directory represent
+files that have been "printed" by a printer.  Their names are constructed using
+the name of the printer, the type of data that was output, and a representation
+of the time at which the file was created.
+
+### Batch Mode
+
+The normal mode of operation of `imprimer` is as an interactive application.
+However, it can also be run in batch mode, in which it reads commands
+from a command file.  If `imprimer` is started as follows:
+
+```sh
+$ imprimer -i command_file
+```
+
+then it begins by reading and executing commands from `command_file` until EOF,
+at which point it presents the normal prompt and executes commands
+interactively.  Normally this feature would be used to cause configuration
+commands (declarations of types, printers, and conversions) to be read from
+a command file, rather than typed each time.  If a `quit` command appears
+in the command file, then the program terminates without entering interactive
+mode.  This can be used to run a series of commands completely automatically
+without user intervention.
+
+If `imprimer` is started with the "`-o` *output_file*" option, then any output
+it produces that would normally appear on the terminal (*i.e.* `stdout`)
+is to be redirected instead to the specified output file.
+In this case the normal user prompt is suppressed, so that it does not appear
+in the output file.
+
+### Reading Input
+
+Your program should use the `sf_readline()` function to read commands from the user.
+The interface of this function (defined in `sf_readline.h`) is as follows:
 
 ```c
 /*
- * @return The starting address of the heap for your allocator.
- */
-void *sf_mem_start();
-
-/*
- * @return The ending address of the heap for your allocator.
- */
-void *sf_mem_end();
-
-/*
- * This function increases the size of your heap by adding one page of
- * memory to the end.
+ * The following function prints a prompt on stdout and collects an arbitrarily
+ * long line from stdin, similarly to GNU readline.  The string that is returned does
+ * not contain the line terminator '\n', so that inputting a blank line returns the
+ * empty string.  An EOF condition on stdin is treated as if it were a newline,
+ * except in case the input line is empty, in which case NULL is returned.
+ * The string that is returned is allocated with malloc, and it is the client's
+ * responsibility to free it.
  *
- * @return On success, this function returns a pointer to the start of the
- * additional page, which is the same as the value that would have been returned
- * by get_heap_end() before the size increase.  On error, NULL is returned
- * and sf_errno is set to ENOMEM.
+ * @param prompt  The prompt to be shown to the user.
+ * @return a string containing the input line typed by the user, not including any
+ * line termination character.  The caller must free this string when finished
+ * with it.
  */
-void *sf_mem_grow();
-
-/* The size of a page of memory returned by sf_mem_grow(). */
-#define PAGE_SZ ((size_t)8192)
-
-/*
- * Display the contents of the heap in a human-readable form.
- */
-void sf_show_block(sf_block *bp);
-void sf_show_blocks();
-void sf_show_free_list(int index);
-void sf_show_free_lists();
-void sf_show_heap();
+char *sf_readline(char *prompt);
 ```
 
-> :scream: As these functions are provided in a pre-built .o file, the source
-> is not available to you. You will not be able to debug these using gdb.
-> You must treat them as black boxes.
+I have provided my own implementation of this function, to suit the purposes of this
+assignment.   We would use GNU readline, except for the fact that it seems to be
+impossible to use GNU readline together with properly written async-signal-safe
+signal handling code.  The version given here arranges for race-free callbacks
+to a client-specified function just before blocking for user input.  This permits
+the actual signal handlers to be written in a safe manner in which they just set flags
+to indicate that signals have arrived, and the actual work of dealing with the signals
+to postponed to the callback function where there are no constraints on what functions
+can be safely used.
 
-# sf_mem_grow
-
-The function `sf_mem_grow` is to be invoked by `sf_malloc`, at the time of the
-first allocation request to obtain an initial free block, and on subsequent allocations
-when a large enough block to satisfy the request is not found.
-For this assignment, your implementation **MUST ONLY** use `sf_mem_grow` to
-extend the heap.  **DO NOT** use any system calls such as **brk** or **sbrk**
-to do this.
-
-Function `sf_mem_grow` returns memory to your allocator in pages.
-Each page is 8192 bytes (8 KB) and there are a limited, small number of pages
-available (the actual number may vary, so do not hard-code any particular limit
-into your program).  Each call to `sf_mem_grow` extends the heap by one page and
-returns a pointer to the new page (this will be the same pointer as would have
-been obtained from `sf_mem_end` before the call to `sf_mem_grow`.
-
-The `sf_mem_grow` function also keeps track of the starting and ending addresses
-of the heap for you. You can get these addresses through the `sf_mem_start` and
-`sf_mem_end` functions.
-
-> :smile: A real allocator would typically use the **brk**/**sbrk** system calls
-> calls for small memory allocations and the **mmap**/**munmap** system calls
-> for large allocations.  To allow your program to use other functions provided by
-> glibc, which rely on glibc's allocator (*i.e.* `malloc`), we have provided
-> `sf_mem_grow` as a safe wrapper around **sbrk**.  This makes it so your heap and
-> the one managed by glibc do not interfere with each other.
-
-# Implementation Details
-
-## Memory Row Size
-
-The table below lists the sizes of data types (following Intel standard terminlogy)
-on x86-64 Linux Mint:
-
-| C declaration | Data type | x86-64 Size (Bytes) |
-| :--------------: | :----------------: | :----------------------: |
-| char  | Byte | 1 |
-| short | Word | 2 |
-| int   | Double word | 4 |
-| long int | Quadword | 8 |
-| unsigned long | Quadword | 8 |
-| pointer | Quadword | 8 |
-| float | Single precision | 4 |
-| double | Double precision | 8 |
-| long double | Extended precision | 16
-
-> :nerd: You can find these sizes yourself using the sizeof operator.
-> For example, `printf("%lu\n", sizeof(int))` prints 4.
-
-In this assignment we will assume that each "memory row" is 8 bytes (64 bits) in size.
-All pointers returned by your `sf_malloc` are to be 16-byte aligned; that is, they will be
-addresses that are multiples of 16.  This requirement permits such pointers to be used to
-store any of the basic machine data types in a "naturally aligned" fashion.
-A value stored in memory is said to be *naturally aligned* if the address at which it
-is stored is a multiple of the size of the value.  For example, an `int` value is
-naturally aligned when stored at an address that is a multiple of 4.  A `long double` value
-is naturally aligned when stored at an address that is a multiple of 16.
-Keeping values naturally aligned in memory is a hardware-imposed requirement for some
-architectures, and improves the efficiency of memory access in other architectures.
-
-## Block Header & Footer Fields
-
-The various header and footer formats are specified in `include/sfmm.h`:
-
-```
-                                 Format of an allocated memory block
-    +-----------------------------------------------------------------------------------------+
-    |                                    64-bit-wide row                                      |
-    +-----------------------------------------------------------------------------------------+
-
-    +------------------------------------------------------------+--------+---------+---------+ <- header
-    |                                       block_size           | unused |prv alloc|  alloc  |
-    |                                  (4 LSB's implicitly 0)    |  (0)   |  (0/1)  |  (0/1)  |
-    |                                        (1 row)             | 2 bits |  1 bit  |  1 bit  |
-    +------------------------------------------------------------+--------+---------+---------+ <- (aligned)
-    |                                                                                         |
-    |                                   Payload and Padding                                   |
-    |                                        (N rows)                                         |
-    |                                                                                         |
-    |                                                                                         |
-    +-----------------------------------------------------------------------------------------+
-
-    NOTE: For an allocated block, there is no footer (it is used for payload).
-```
-
-```
-                                     Format of a free memory block
-    +------------------------------------------------------------+--------+---------+---------+ <- header
-    |                                       block_size           | unused |prv alloc|  alloc  |
-    |                                  (4 LSB's implicitly 0)    |  (0)   |  (0/1)  |  (0/1)  |
-    |                                        (1 row)             | 2 bits |  1 bit  |  1 bit  |
-    +------------------------------------------------------------+--------+---------+---------+ <- (aligned)
-    |                                                                                         |
-    |                                Pointer to next free block                               |
-    |                                        (1 row)                                          |
-    +-----------------------------------------------------------------------------------------+
-    |                                                                                         |
-    |                               Pointer to previous free block                            |
-    |                                        (1 row)                                          |
-    +-----------------------------------------------------------------------------------------+
-    |                                                                                         | 
-    |                                         Unused                                          | 
-    |                                        (N rows)                                         |
-    |                                                                                         |
-    |                                                                                         |
-    +------------------------------------------------------------+--------+---------+---------+ <- footer
-    |                                       block_size           | unused |prv alloc|  alloc  |
-    |                                  (4 LSB's implicitly 0)    |  (0)   |  (0/1)  |  (0/1)  |
-    |                                        (1 row)             | 2 bits |  1 bit  |  1 bit  |
-    +------------------------------------------------------------+--------+---------+---------+
-
-    NOTE: For a free block, footer contents must always be identical to header contents.
-```
-
-The `sfmm.h` header file contains C structure definitions corresponding to the above diagrams:
+The signal hander callback is installed using the following companion function,
+which is also defined in `sf_readline.h`):
 
 ```c
-#define THIS_BLOCK_ALLOCATED  0x1
-#define PREV_BLOCK_ALLOCATED  0x2
-
-typedef size_t sf_header;
-typedef size_t sf_footer;
-
-/*
- * Structure of a block.
- */
-typedef struct sf_block {
-    sf_header header;
-    union {
-        /* A free block contains links to other blocks in a free list. */
-        struct {
-            struct sf_block *next;
-            struct sf_block *prev;
-        } links;
-        /* An allocated block contains a payload (aligned), starting here. */
-        char payload[0];   // Length varies according to block size.
-    } body;
-    // Depending on whether the block is allocated or free, and on whether footer optimization
-    // is in use, a block might have a footer at the end, either overlapping the payload area
-    // or in addition to it.  Since the payload size is not known at compile-time, we can't
-    // declare the footer here as a field of the struct but instead have to compute its location
-    // at run time.
-} sf_block;
+typedef int signal_hook_func_t (void);
+void sf_set_readline_signal_hook(signal_hook_func_t func);
 ```
 
-For `sf_block`, the `body` field is a `union`, which has been used to emphasize
-the difference between the information contained in a free block and that contained
-in an allocated block.  If the block is free, then its `body` has a `links` field,
-which is a `struct` containing `next` and `prev` pointers.  If the block is
-allocated, then its `body` does not have a `links` field, but rather has a `payload`,
-which starts at the same address that the `links` field would have started if the
-block were free.  The size of the `payload` is obviously not zero, but as it is
-variable and only determined at run time, the `payload` field has been declared
-to be an array of length 0 just to enable the use of `bp->body.payload` to obtain
-a pointer to the payload area, if `bp` is a pointer to `sf_block`.
+Calling `sf_set_readline_signal_hook()` causes the function pointer passed as
+its argument to be saved.  When `sf_readline()` is subsequently called, if there is no
+input currently available, then just before blocking to await input,
+the callback function is invoked with signals masked.  The callback function
+(which the client of `sf_readline()` is responsible for implementing) can then check
+for whether any signals have been received that require processing before the process
+blocks for a potentially long time.  Note that since the callback function is called
+very frequently, it should take care to return quickly if there is no signal handling
+to be done.
 
-> :thumbsup:  You can use casts to convert a generic pointer value to one
-> of type `sf_block *` or `sf_header *`, in order to make use of the above
-> structure definitions to easily access the various fields.  You can even cast
-> an integer value to these pointer types; this is sometimes required when
-> calculating the locations of blocks in the heap.
+### Signal Handling
 
-When a block is free, it must have a valid footer whose contents are identical to the
-header contents.  We will use a "footer optimization" technique that permits a footer
-to be omitted from allocated blocks; thereby making the space that would otherwise
-be occupied by the footer available for use by payload.  The footer optimization
-technique involves maintaining a bit in the header of each block that can be checked
-to find out if the immediately preceding block is allocated or free.
-If the preceding block is free, then its footer can be examined to find out its
-size and then the size can be used to calculate the block's starting address for the
-purpose of performing coalescing.
-If the preceding block is **not** free, then it has no footer, but as we can only
-coalesce with a free block there is no need for the information that we would have
-found in the footer, anyway.
+Your `imprimer` program should install a `SIGCHLD` handler so that it can be notified
+when conversion pipelines exit, crash, stop, or continue.
+If you want your program to work reliably, you must only use async-signal-safe
+functions in your signal handler.
+You should make every effort not to do anything "complicated" in a signal handler;
+rather the handler should just set flags or other variables to communicate back to
+the main program what has occurred and the main program should check these flags and
+perform any additional actions that might be necessary.
+Variables used for communication between the handler and the main program should
+be declared `volatile` so that a handler will always see values that
+are up-to-date (otherwise, the C compiler might generate code to cache updated
+values in a register for an indefinite period, which could make it look to a
+handler like the value of a variable has not been changed when in fact it has).
+Ideally, such variables should be of type `sig_atomic_t`, which means that they
+are just integer flags that are read and written by single instructions.
+Note that operations, such as the auto-increment `x++`, and certainly more complex
+operations such as structure assignments, will generally not be performed as a single
+instruction.  This means that it would be possible for a signal handler to be
+invoked "in the middle" of such an operation, which could lead to "flaky"
+behavior if it were to occur.
 
-## Free List Heads
+  > :nerd: Note that you may need to use `sigprocmask()` to block signals at
+  > appropriate times, to avoid races between the handler and the main program,
+  > the occurrence of which can also result in indeterminate behavior.
+  > In general, signals must be blocked any time the main program is actively
+  > involved in manipulating variables that are shared with a signal handler.
 
-In the file `include/sfmm.h`, you will see the following declaration:
+Note that standard I/O functions such as `fprintf()` are not async-signal-safe,
+and thus cannnot reliably be used in signal handlers.  For example, suppose the
+main program is in the middle of doing an `fprintf()` when a signal handler is invoked
+asynchronously and the handler itself tries to do `fprintf()`.  The two invocations
+of `fprintf()` share state (not just the `FILE` objects that are being printed to,
+but also static variables used by functions that do output formatting).
+The `fprintf()` in the handler can either see an inconsistent state left by the
+interrupted `fprintf()` of the main program, or it can make changes to this state that
+are then visible upon return to the main program.  Although it can be quite useful
+to put debugging printout in a signal handler, you should be aware that you can
+(and quite likely will) see anomalous behavior resulting from this, especially
+as the invocations of the handlers become more frequent.  Definitely be sure to
+remove or disable this debugging printout in any "production" version of your
+program, or you risk unreliability.
 
-```c
-#define NUM_FREE_LISTS 8
-struct sf_block sf_free_list_heads[NUM_FREE_LISTS];
+### Functions You Must Implement
+
+There is just one function which you have to implement as specified:
+
+* `int run_cli(FILE *in, FILE *out)` - This function is called from `main()` to allow the
+  user to interact with the program.  User commands are to be read from the stream `in`
+  and output for the user (including error messages) is to be written to the stream `out`.
+  You should not make any assumptions about what these streams are, as during grading we
+  will likely call this function from a test driver that replaces the human user.
+  Use `sf_readline()` to read input.  If `out != stdout` then suppress the prompt.
+  This function should return -1 if either a `quit` command was executed or else
+  `in == NULL || in == stdin` and an EOF was encountered while reading input.
+  Otherwise (*i.e.* `in != NULL && in != stdin` and `quit` was not executed), 0 is returned.
+
+	> :scream:  **Do not make any changes to `main.c`.**
+    > Any initialization your program requires must be performed out of the `run_cli()`
+    > function.  Note that `run_cli()` may be called more than once, so you have to take
+    > care to only do initialization on the first call.  
+    > The `run_cli()` function must return; do **not** `exit()` from `run_cli()`.
+
+### Event Functions You Must Call
+
+In order for us to perform automated testing of your program, you are required to
+call certain functions at specified times during execution.  These functions
+are provided to you in a library file that gets linked with your code.
+The version provided with the basecode just generates printout on the terminal
+when the functions are called, to help you make sure that you have called them
+correctly.  For grading, we will use a different implementation, which instead
+of printout will send "events" over a network socket to a tracking program that
+will analyze whether or not your program is behaving correctly.
+Be very careful to read and follow the instructions below, as it will have a direct
+and highly significant impact on your grade if you don't.
+All the functions below must be called *promptly* as soon as the stated
+conditions have been met.  Any substantial delay in the calling of these functions
+will likely result in your program failing our tests.
+
+* `void sf_cmd_ok(void)` - This function must be called upon successful
+  completion of the processing of a user command, after any other actions
+  taken in the processing of the command and before prompting the user for
+  the next command.  It should be called at most once for each command.
+
+* `void sf_cmd_error(char *msg)` - This function must be called when the
+  processing of a command results in an error, after any other actions taken
+  in the processing of the command and before prompting the user for the
+  next command.  It should be called at most once for each command.
+  The `msg` argument may be used to supply information about the error,
+  if desired.
+  
+	> :scream:  Every command should result in either a call to `sf_cmd_ok()`
+	> or `sf_command_error()`.
+
+* `void sf_printer_defined(char *name, char *type)` - This function must
+  be called upon successfully completing the definition of a new printer.
+  
+* `void sf_printer_status(char *name, PRINTER_STATUS status)` - This function
+  must be called each time the status of a printer has changed.
+  The `status` argument gives the new status of the printer.  This function
+  should *not* be called when a new printer has been defined: instead the call
+  to `sf_printer_defined()` implies that the printer has been set to status
+  `PRINTER_DISABLED`.
+
+* `void sf_job_created(int id, char *file_name, char *file_type)` -
+  This function must be called upon the successful creation of a job consisting
+  of a file to be printed.
+
+* `void sf_job_started(int id, char *printer, int pgid, char **path)` - This
+  function must be called when printing of a job has started.  The `printer`
+  argument names the printer chosen to print the job, the `pgid` argument
+  is the process group ID of the job pipeline master process, and the `path`
+  argument is a NULL-terminated array of strings that contains the names
+  of the commands (without any arguments) to be executed in the conversion
+  pipeline.
+
+* `void sf_job_finished(int id, int status)` - This function must be called
+  when a print job has terminated successfully.  The `status` argument should
+  be the exit status of the conversion pipeline master process, as returned
+  by `waitpid()`.
+
+* `void sf_job_aborted(int id, int status)` - This function must be called
+  when a print job has either terminated by a signal or has exited
+  with a nonzero exit status.  The `status` argument is as for
+  `sf_job_finished()`.
+
+* `void sf_job_deleted(int id)` - This function must be called when a
+  finished or aborted job is removed from the job queue and deleted.
+
+* `void sf_job_status(int id, JOB_STATUS status)` - This function must be
+  called each time the status of a job has changed.  The `status`
+  argument gives the new status of the job.  This function should
+  *not* be called when a new job is created: instead the call to
+  `void sf_job_created()` implies that the job has been set to status
+  `JOB_CREATED`.
+
+The normal behavior of the above functions is to produce printout on
+the terminal in a yellow color.  This is for informational purposes and
+it should not be expected that the user sees these messages.
+Your program should produce output that is sufficient to allow the user
+to interact with the program.
+To suppress the printing of the informational messages from the event
+functions, the global integer variable `sf_suppress_chatter` can be
+set to a nonzero value.
+
+## Provided Components
+
+### The `imprimer.h` Header File
+
+The `imprimer.h` header file that we have provided defines function prototypes
+for the functions you are to use to format output for your program and to make
+connections to printers.  It also contains definitions of some constants and data
+types related to these functions.
+
+  > :scream: **Do not make any changes to `imprimer.h`.  It will be replaced
+  > during grading, and if you change it, you will get a zero!**
+
+### The `imprimer.a` Library
+
+We have provided you with an object file `imprimer.a` (in the `lib` directory),
+which will be automatically linked with your program.  This library contains
+the implementations of various functions discussed above.
+
+  * int imp_connect_to_printer(char *printer_name, char *printer_type, int flags);
+
+	This is the function you **must** use to connect to a printer.  If successful,
+	it returns a file descriptor to be used to send data to the printer;
+	if unsuccessful, -1 is returned.  If the printer is not currently "up",
+	then it will be started (see about the `printer` program below).
+	See `imprimer.h` for more information about the arguments.
+
+In order to interface with the above functions, the header file `imprimer.h` defines
+structure types `PRINTER` and `JOB`.  You *must* pass in instances of these structures
+that have all fields properly initialized.  The meaning of each of the fields is
+documented in the comments in the `imprimer.h` file.  Each of these structures also
+has an additional `other` field, which can be used to point to arbitrary information
+of your own choosing should you have a need to do so.  The functions above ignore the
+value of this field, so there is no harm if you don't initialize it.
+
+### The `printer` Program
+
+The `printer` program we have provided (in the `util` directory) simulates a printer
+that you can connect to and send data to.  It doesn't actually "print" anything,
+but it does log any files you send to it in the `spool` directory.  It also maintains
+a debug log in that directory, in case it is necessary to get some idea of what the
+printer has been doing.
+
+A printer is automatically started when you try to connect to it using the
+`imp_connect_to_printer()` function, if it is not already up.
+You can also start a printer "manually" by a command of the following form:
+
+```sh
+$ util/printer [-d] [-f] PRINTER_NAME FILE_TYPE
 ```
 
-The array `sf_free_list_heads` contains the heads of the main free lists,
-which are maintained as **circular, doubly linked lists**.
-Each node in a free list contains a `next` pointer that points to the next
-node in the list, and a `prev` pointer that points the previous node.
-For each index `i` with `0 <= i < NUM_FREE_LISTS` the variable `sf_free_list_head[i]`
-is a dummy, "sentinel" node, which is used to connect the beginning and the end of
-the list at index `i`.  This sentinel node is always present and (aside from its `next`
-and `free` pointers) does **not** contain any other data.  If the list is empty,
-then the fields `sf_freelist_heads[i].body.links.next` and `sf_freelist_heads[i].body.links.prev`
-both contain `&sf_freelist_heads[i]` (*i.e.* the sentinel node points back to itself).
-If the list is nonempty, then `sf_freelist_heads[i].body.links.next` points to the
-first node in the list and `sf_freelist_heads[i].body.links.prev` points to the
-last node in the list.
-Inserting into and deleting from a circular doubly linked list is done
-in the usual way, except that, owing to the use of the sentinel, there
-are no edge cases for inserting or removing at the beginning or the end
-of the list.
-If you need a further introduction to this data structure, you can readily
-find information on it by googling ("circular doubly linked lists with sentinel").
-
-> :scream:  You **MUST** use the `sf_free_list_heads` array for the heads
-> of your free lists and you **MUST** maintain these lists as circular,
-> doubly linked lists.
-> The helper functions discussed later, as well as the unit tests,
-> will assume that you have done this when accessing your free lists.
-
-> :scream:  Note that the head of a freelist must be initialized before the list
-> can be used.  The initialization is accomplished by setting the `next` and `prev`
-> pointers of the sentinel node to point back to the node itself.
-
-## Overall Structure of the Heap: Prologue and Epilogue
-
-Your heap should use a prologue and epilogue (as described in the book, **page 855**) to
-arrange for the proper block alignment and to avoid edge cases when coalescing blocks.
-The overall organization of the heap is as shown below:
-
-```c
-                                         Format of the heap
-    +-----------------------------------------------------------------------------------------+
-    |                                    64-bit-wide row                                      |
-    +-----------------------------------------------------------------------------------------+
-
-    +-----------------------------------------------------------------------------------------+ <- heap start
-    |                                                                                         |    (aligned)
-    |                                        Unused                                           |
-    |                                       (1 rows)                                          |
-    +------------------------------------------------------------+--------+---------+---------+ <- header
-    |                                       block_size           | unused |prv alloc|  alloc  |
-    |                                  (4 LSB's implicitly 0)    |  (0)   |  (0/1)  |  (0/1)  | first block
-    |                                        (1 row)             | 2 bits |  1 bit  |  1 bit  |
-    +------------------------------------------------------------+--------+---------+---------+ <- (aligned)
-    |                                                                                         |
-    |                                   Payload and Padding                                   |
-    |                                        (N rows)                                         |
-    |                                                                                         |
-    |                                                                                         |
-    +--------------------------------------------+------------------------+---------+---------+
-    |                                                                                         |
-    |                                                                                         |
-    |                                                                                         |
-    |                                                                                         |
-    |                             Additional allocated and free blocks                        |
-    |                                                                                         |
-    |                                                                                         |
-    |                                                                                         |
-    +-----------------------------------------------------------------------------------------+
-    |                                                                                         |
-    |                       Unused (will become header when heap grows)                       |
-    |                                        (1 row)                                          |
-    +-----------------------------------------------------------------------------------------+ <- heap end
-                                                                                                   (aligned)
-```
-
-The heap begins with unused "padding", so that the header of each block will start
-`sizeof(sf_header)` bytes before an alignment boundary.
-The first block of the heap is the "prologue", which is an allocated block of minimum
-size that is otherwise unused.
-
-At the end of the heap is an "epilogue", which consists only of an allocated header,
-with block size set to 0.
-The prologue and epilogue are never used to satisfy allocation requests and they
-are never freed.
-Whenever the heap is extended, a new epilogue is created at the end of the
-newly added region and the old epilogue becomes the header of the new block.
-This is as described in the book.
-
-We do not make any separate C structure definitions for the prologue and epilogue.
-They can be manipulated using the existing `sf_block` structure, though care must be taken
-not to access fields that are not valid for these special blocks
-(*i.e.* `prev_footer` for the prologue and anything other than `header` and `prev_footer`
-for the epilogue).
-
-As your heap is initially empty, at the time of the first call to `sf_malloc`
-you will need to make one call to `sf_mem_grow` to obtain a page of memory
-within which to set up the prologue and initial epilogue.
-The remainder of the memory in this first page should then be inserted into
-the free list as a single block.
-
-## Notes on sf_malloc
-
-When implementing your `sf_malloc` function, first determine if the request size
-is 0.  If so, then return `NULL` without setting `sf_errno`.
-If the request size is non-zero, then you should determine the size of the
-block to be allocated by adding the header size and the size of any necessary
-padding to reach a size that is a multiple of 16 to maintain proper alignment.
-Remember also that the block has to be big enough to store the footer
-as well as the `next` and `prev` pointers when the block is free.
-As these fields are not present in an allocated block this space can (and should)
-be overlapped with the payload area.
-As has already been discussed, the above constraints lead to a minimum block size
-of 32 bytes, so you should not attempt to allocate any block smaller than this.
-After having determined the required block size, you should determine the
-index of the first free list that would be able to satisfy a request of that size.
-Search that free list from the beginning until the first sufficiently large
-block is found.  If there is no such block, continue with the next larger
-size class.
-If a big enough block is found, then after splitting it (if it will not leave
-a splinter), you should insert the remainder part back into the appropriate
-freelist.  When splitting a block, the "lower part" (lower-numbered addresses)
-should be used to satisfy the allocation request and the "upper part"
-(higher-numbered addresses) should become the remainder.
-
-If a big enough block is not found in any of the other freelists, then as a
-last resort consider the "wilderness block" (if any) in the last freelist.
-If this block does not currently exist or is also not big enough, then you
-must use `sf_mem_grow` to request more memory
-(for requests larger than a page, more than one such call might be required).
-If your allocator ultimately cannot satisfy the request, your `sf_malloc` function
-must set `sf_errno` to `ENOMEM` and return `NULL`.
-
-### Notes on sf_mem_grow
-
-After each call to `sf_mem_grow`, you must attempt to coalesce the newly
-allocated page with any wilderness block immediately preceding it, in order to build
-blocks larger than one page.  Insert the new (wilderness) block at the beginning of
-the last freelist.
-
-**Note:** Do not coalesce with the prologue or epilogue, or past the beginning
-or end of the heap.
-
-## Notes on sf_free
-
-When implementing `sf_free`, you must first verify that the pointer being
-passed to your function belongs to an allocated block. This can be done by
-examining the fields in the block header.  In this assignment, we will consider
-the following cases to be invalid pointers:
-
-- The pointer is `NULL`.
-- The pointer is not 16-byte aligned.
-- The size of the block is not a multiple of 16.
-- The size of the block is less than the minimum block size.
-- The `allocated` bit in the header is 0.
-- The contents of the block header are different than those of the block footer.
-- Some or all of the block lies outside of the current heap bounds.
-- The header of the next block lies outside of the current heap bounds.
-- The `prev_alloc` bit of the block header does not match the `alloc` bit of the
-  previous block (or the prologue, in case the block is the first one in the heap).
-
-If an invalid pointer is passed to your function, you must call `abort` to exit
-the program.  Use the man page for the `abort` function to learn more about this.
-
-After confirming that a valid pointer was given, you must free the block.
-First, the block must be coalesced with any adjacent free block.
-Then, determine the size class appropriate for the (now-coalesced) block and
-inserting the block at the beginning of the free list for that size class.
-A wilderness block must be inserted in the last free list; all other blocks
-must be inserted in lists before the last.
-
-Note that blocks in a main free list must **not** be marked as allocated,
-and they must have a valid footer with contents identical to the block header.
-
-# Notes on sf_realloc
-
-When implementing your `sf_realloc` function, you must first verify that the
-pointer passed to your function is valid. The criteria for pointer validity
-are the same as those described in the 'Notes on sf_free' section above.
-If the pointer is valid but the size parameter is 0, free the block and return `NULL`.
-
-After verifying the parameters, consider the cases described below.
-Note that in some cases, `sf_realloc` is more complicated than calling `sf_malloc`
-to allocate more memory, `memcpy` to move the old memory to the new memory, and
-`sf_free` to free the old memory.
-
-## Reallocating to a Larger Size
-
-When reallocating to a larger size, always follow these three steps:
-
-1. Call `sf_malloc` to obtain a larger block.
-
-2. Call `memcpy` to copy the data in the block given by the client to the block
-returned by `sf_malloc`.  Be sure to copy the entire payload area, but no more.
-
-3. Call `sf_free` on the block given by the client (inserting into a quick list
-or main freelist and coalescing if required).
-
-4. Return the block given to you by `sf_malloc` to the client.
-
-If `sf_malloc` returns `NULL`, `sf_realloc` must also return `NULL`. Note that
-you do not need to set `sf_errno` in `sf_realloc` because `sf_malloc` should
-take care of this.
-
-## Reallocating to a Smaller Size
-
-When reallocating to a smaller size, your allocator must use the block that was
-passed by the caller.  You must attempt to split the returned block. There are
-two cases for splitting:
-
-- Splitting the returned block results in a splinter. In this case, do not
-split the block. Leave the splinter in the block, update the header field
-if necessary, and return the same block back to the caller.
-
-**Example:**
-
-<pre>
-            b                                               b
-+----------------------+                       +------------------------+
-| allocated            |                       |   allocated.           |
-| Blocksize: 64 bytes  |   sf_realloc(b, 32)   |   Block size: 64 bytes |
-| payload: 48 bytes    |                       |   payload: 32 bytes    |
-|                      |                       |                        |
-|                      |                       |                        |
-+----------------------+                       +------------------------+
-</pre>
-
-In the example above, splitting the block would have caused a 24-byte splinter.
-Therefore, the block is not split.
-
-- The block can be split without creating a splinter. In this case, split the
-block and update the block size fields in both headers.  Free the remainder block
-by inserting it into the appropriate free list (after coalescing, if possible --
-do not insert the remainder block into a quick list).
-Return a pointer to the payload of the now-smaller block to the caller.
-
-Note that in both of these sub-cases, you return a pointer to the same block
-that was given to you.
-
-**Example:**
-
-<pre>
-            b                                              b
-+----------------------+                       +------------------------+
-| allocated            |                       | allocated |  free      |
-| Blocksize: 128 bytes |   sf_realloc(b, 50)   | 64 bytes  |  64 bytes. |
-| payload: 80 bytes    |                       | payload:  |            |
-|                      |                       | 50 bytes  | goes into  |
-|                      |                       |           | free list  |
-+----------------------+                       +------------------------+
-</pre>
-
-# Notes on sf_memalign
-
-The `sf_memalign` function permits the caller to request a region of memory that
-satisfies a more restrictive alignment requirement than the default 64-byte
-alignment.  Such a facility is sometimes required in system programming; for example,
-if the memory address returned by the allocator is to be given to an I/O device
-that is only capable of accessing memory regions with alignments greater than the
-default.
-
-When `sf_memalign` is called, it must check that the requested alignment is at
-least as large as the minimum block size.  It must also check that the requested
-alignment is a power of two.  If either of these tests fail, `sf_errno` should
-be set to `EINVAL` and `sf_memalign` should return `NULL`.
-If these tests pass, then `sf_memalign` should treat the requested size in the
-say way as for `malloc`.
-
-In order to obtain memory with the requested alignment, `sf_memalign` allocates
-a larger block than requested.  Specifically, it attempts to allocate a block
-whose size is at least the requested size, plus the alignment size, plus the minimum
-block size, plus the size required for a block header.  A block of this size
-will have the following property: either the normal payload address of the block
-will satisfy the requested alignment (in which case nothing further need be done),
-or else there will be a larger address within the block that satisfies the requested
-alignment, has sufficient space after it to hold the requested size payload,
-and in addition is sufficiently far from the beginning of the block that the initial
-portion of the block can itself be split off into a block of at least minimum size
-and freed:
-
-<pre>
-     large block
-+-------------------------+                    +----+--------------------+
-|                         |                    |    |                    |
-|                         |    split 1         |    |                    |
-|                         |      ==>           |free|hdr payload         |
-|                         |                    |  1 |    ^               |
-|                         |                    |    |    |               |
-+---------+---------------+                    +----+----+---------------+
-        aligned                                          aligned
-</pre>
-
-Once any initial portion of the block has been split off and freed, if the block
-is still too large for the requested size then it is subjected to splitting in
-the normal way (*i.e.* as in `malloc`) and the unused remainder is freed.
-
-<pre>
-+----+--------------------+                    +----+---------------+----+
-|    |                    |                    |    |               |    |
-|    |                    |                    |    |allocated block|    |
-|free|hdr payload         |   split 2          |free|hdr payload    |free|
-|  1 |    ^               |     ==>            |  1 |    ^          |  2 |
-|    |    |               |                    |    |    |          |    |
-+----+----+---------------+                    +----+----+----------+----+
-          aligned                                        aligned
-</pre>
-
-# Helper Functions
-
-The `sfutil` library additionally contains the following helper functions,
-which should be self explanatory.  They all output to `stderr`.
-
-```c
-void sf_show_block(sf_block *bp);
-void sf_show_free_list(int index);
-void sf_show_free_lists();
-void sf_show_quick_list(int index);
-void sf_show_quick_lists();
-void sf_show_heap();
-```
-
-We have provided these functions to help you visualize your free lists and
-allocated blocks.
-
-# Unit Testing
-
-For this assignment, we will use Criterion to test your allocator. We have
-provided a basic set of test cases and you will have to write your own as well.
-
-You will use the Criterion framework alongside the provided helper functions to
-ensure your allocator works exactly as specified.
-
-In the `tests/sfmm_tests.c` file, there are ten unit test examples. These tests
-check for the correctness of `sf_malloc`, `sf_realloc`, and `sf_free`.
-We provide some basic assertions, but by no means are they exhaustive.  It is your
-job to ensure that your header/footer bits are set correctly and that blocks are
-allocated/freed as specified.
-
-## Compiling and Running Tests
-
-When you compile your program with `make`, a `sfmm_tests` executable will be
-created in the `bin` folder alongside the `main` executable. This can be run
-with `bin/sfmm_tests`. To obtain more information about each test run, you can
-use the verbose print option: `bin/sfmm_tests --verbose=0`.
-It is also possible to restrict the set of tests that are run.  For example,
-using `--filter suite_name/test_name` will only run the test named `test_name`
-in test suite `suite_name` (if there is such a test, otherwise it will run
-no tests).
-
-# Writing Criterion Tests
-
-The first test `malloc_an_int` tests `sf_malloc`.
-It allocates space for an integer and assigns a value to that space.
-It then runs an assertion to make sure that the space returned by `sf_malloc`
-was properly assigned.
-
-```c
-cr_assert(*x == 4, "sf_malloc failed to give proper space for an int!");
-```
-
-The string after the assertion only gets printed to the screen if the assertion
-failed (i.e. `*x != 4`). However, if there is a problem before the assertion,
-such as a SEGFAULT, the unit test will print the error to the screen and
-continue to run the rest of the unit tests.
-
-For this assignment **<font color="red">you must write 5 additional unit tests
-which test new functionality and add them to `sfmm_tests.c` below the following
-comment:</font>**
+This starts a printer with name `PRINTER_NAME`, which is capable of printing files of
+type `FILE_TYPE`.  Each printer that is started must have a unique name; if you try
+to start a second printer with the same name as an existing printer, the second
+command will fail.  Once started, printers stay "up" until they are explicitly stopped,
+You can stop all printers using the command `make stop_printers`.
+The command `make show_printers` can be used to show you the printers that are currently up.
+
+The optional `-d` and `-f` arguments to the `printer` command are used to cause the
+printer to exhibit some random behavior.  If `-d` is specified, then random delays
+might occur during "printing".  If `-f` is specified, then the printer will be "flaky",
+which means that it might disconnect at random times, causing the conversion pipeline
+to fail.  The `imp_connect_to_printer()` function has a `flags` argument that can
+also be used to specify these flags.  The flags only take effect when the printer
+is first started; once a printer is "up", the flags passed when connecting to it
+have no further effect.  The flags should be the bitwise "or" of one or more of
+`PRINTER_NORMAL`, `PRINTER_DELAY`, and `PRINTER_FLAKY`.
+
+### The `show_printers.sh` and `stop_printers.sh` Shell Scripts
+
+The `util` directory contains shell scripts `show_printers.sh` and `stop_printers.sh`.
+These are most easily invoked using `make show_printers` or `make stop_printers`,
+though they can also be run directly.
+
+### The `convert` program
+
+Although your program must be able to use in a conversion pipeline any command
+that reads data from standard input and writes data to standard output,
+for development purposes I have provided a "dummy" conversion program that
+doesn't really do any conversions but rather is just a stub to take the place
+of a real program that actually would do some conversions.
+The `convert` program takes two arguments: the first is the name of the input
+file type and the second is the name of the output file type.
+When `convert` program is invoked, it simply copies its standard input to its
+standard output, like the program `/bin/cat` except that `convert` prepends
+an identifying line to its output to show what it is doing.
+
+### The `spool` Directory
+
+The `spool` directory is created by `make` in order to store various files created
+by the "printers".  For example, if a printer is started with name `alice`, then
+`spool/alice.log` will contain debug log information, `spool/alice.pid` will contain
+the process ID of the printer process (for use by `stop_printers.sh`),
+`spool/alice.sock` will be a "socket" that is used by `imp_connect_to_printer()`
+to connect the printer.  Also, each time a file is "printed" the data that was received
+is stored in a separately named file in this directory.
+The `spool` directory is not removed by a normal `make clean`. 
+To remove the `spool` directory and all its contents, you can use `make clean_spool`.
+
+### Test Cases
+
+The file `tests/basecode_tests.c` contains some very basic test cases to get
+you started on the program.  The test cases should be run as follows:
 
 ```
-//############################################
-//STUDENT UNIT TESTS SHOULD BE WRITTEN BELOW
-//DO NOT DELETE THESE COMMENTS
-//############################################
+$ bin/imprimer_tests -j1
 ```
 
-> For additional information on Criterion library, take a look at the official
-> documentation located [here](http://criterion.readthedocs.io/en/master/)! This
-> documentation is VERY GOOD.
+You may, of course add additional Criterion options, such as `--verbose`.
+The `-j1` option restricts Criterion to only run one test at a time.  The default
+mode of execution of Criterion is to run tests concurrently.  However, because the
+various tests share the same "printers", if they are run concurrently they will
+interfere with each other.
 
-# Hand-in instructions
-Make sure your directory tree looks like it did originally after merging the basecode,
-and and that your homework compiles.
+### Demo program
 
-This homework's tag is: `hw3`
+For assignments like this one, which have fairly long and involved specifications,
+I have found it useful in the past to provide, when possible, a demo version of
+what you are supposed to implement, so that many questions that you might have
+about the specifications can be answered by trying the demo program.
+I have included such a demo program as `demo/imprimer` in the basecode distribution.
+You should regard the behavior of the program as an aid to understanding, not as
+the specification of what you are supposed to do.
+Although for the most part I expect the demo program to behave in accordance with
+the assignment specifications, there might be some discrepancies.
+In case of inconsistencies between the specifications in this document and the
+behavior of the demo program, the specifications in this document take precedence.
 
-<pre>
-$ git submit hw3
-</pre>
+## Hand-in instructions
+As usual, make sure your homework compiles before submitting.
+Test it carefully to be sure that doesn't crash or exhibit "flaky" behavior
+due to race conditions.
+Use `valgrind` to check for memory errors and leaks.
+Besides `--leak-check=full`, also use the option `--track-fds=yes`
+to check whether your program is leaking file descriptors because
+they haven't been properly closed.
+You might also want to look into the `valgrind` `--trace-children` and related
+options.
 
-# A Word to the Wise
-
-This program will be very difficult to get working unless you are
-extremely disciplined about your coding style.  Think carefully about how
-to modularize your code in a way that makes it easier to understand and
-avoid mistakes.  Verbose, repetitive code is error-prone and **evil!**
-When writing your program try to comment as much as possible.
-Format the code consistently.  It is much easier for your TA and the
-professor to help you if we can quickly figure out what your code does.
+Submit your work using `git submit` as usual.
+This homework's tag is: `hw4`.
